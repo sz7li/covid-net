@@ -14,6 +14,7 @@ import numpy as np
 
 from PIL import Image
 from google.cloud import storage
+from zipfile import ZipFile
 
 import tensorflow as tf
 from tensorflow.keras.utils import Sequence
@@ -31,7 +32,7 @@ print(f"GPUS {tf.config.list_physical_devices('GPU')}")
 
 class DataGenerator(Sequence):
     'Generates data for Keras'
-    def __init__(self, list_IDs, labels, images_path, batch_size=32, dim=(512, 512), n_channels=3,
+    def __init__(self, list_IDs, labels, images_path="/tmp/train/", batch_size=32, dim=(512, 512), n_channels=3,
                  n_classes=1, shuffle=True, to_fit=True, images_in_mem=None):
         'Initialization'
         self.dim = dim
@@ -81,6 +82,7 @@ class DataGenerator(Sequence):
                 X[i,] = self.images_in_mem[ID]
         else:
             # Generate data
+            print(f"Opening {len(list_IDs_temp)} files")
             for i, ID in enumerate(list_IDs_temp):
                 with tf.io.gfile.GFile(self.images_path + ID, 'rb') as fid: 
                     encoded_jpg = fid.read()
@@ -102,7 +104,7 @@ class DataGenerator(Sequence):
 def create_model():
     inputs = Input(shape=(512, 512, 1))
 
-    conv = Conv2D(24, (3, 3), activation='relu') (inputs)
+    conv = Conv2D(20, (3, 3), activation='relu') (inputs)
     conv = MaxPooling2D((2, 2)) (conv)
     conv = Dropout(0.2) (conv)
 
@@ -111,7 +113,7 @@ def create_model():
     # conv = Dropout(0.2) (conv)
 
     conv = Flatten()(conv)
-    conv = Dense(64, activation="relu") (conv)
+    conv = Dense(256, activation="relu") (conv)
     conv = Dropout(0.2) (conv)
 
     conv = Dense(64, activation="relu") (conv)
@@ -128,17 +130,25 @@ def create_model():
 
     return model
 
-def load_data(images_path, files):
-    data = {}
-    for ID in tqdm(files):
-        with tf.io.gfile.GFile(images_path + ID, 'rb') as fid: 
-            encoded_jpg = fid.read()
+def load_data(data_file, get_test_data=False, extract_to="/tmp"):
+    with tf.io.gfile.GFile(data_file, 'rb') as fid: 
+            stream = fid.read()
 
-        encoded_jpg_io = io.BytesIO(encoded_jpg)
-        image = Image.open(encoded_jpg_io)
-        data[ID] = np.expand_dims(np.asarray(image.convert('L')) / 255.0, axis=-1)
+    zipfile = ZipFile(io.BytesIO(stream))
+    zipfile.extractall(path=extract_to)
 
-    return data
+    if get_test_data:
+        file_names = os.listdir(f"{extract_to}/test/")
+        data = []
+        for ID in tqdm(file_names):
+            with tf.io.gfile.GFile(f"{extract_to}/test/" + ID, 'rb') as fid: 
+                encoded_jpg = fid.read()
+
+            encoded_jpg_io = io.BytesIO(encoded_jpg)
+            image = Image.open(encoded_jpg_io)
+            data.append(np.expand_dims(np.asarray(image.convert('L')) / 255.0, axis=-1))
+
+        return file_names, np.asarray(data)
 
 def _is_chief(cluster_resolver):
     task_type = cluster_resolver.task_type
@@ -150,7 +160,7 @@ def _get_temp_dir(model_path, cluster_resolver):
     return os.path.join(model_path, worker_temp)
 
 
-def save_model(model_path, model):
+def save_data(model_path, data):
     # the following is need for TF 2.2. 2.3 onward, it can be accessed from strategy
     cluster_resolver = tf.distribute.cluster_resolver.TFConfigClusterResolver()
     is_chief = _is_chief(cluster_resolver)
@@ -158,7 +168,7 @@ def save_model(model_path, model):
     if not is_chief:
         model_path = _get_temp_dir(model_path, cluster_resolver)
 
-    model.save(model_path)
+    data.to_csv(model_path, index=False)
 
     if is_chief:
         # wait for workers to delete; check every 100ms
@@ -185,7 +195,13 @@ if __name__ == "__main__":
         nargs='+',
         help='Training file local or GCS',
         default=[
-            'gs://covid-net/train/'])
+            'gs://covid-net/train_zipped.zip'])
+    parser.add_argument(
+        '--test-files',
+        nargs='+',
+        help='Test file local or GCS',
+        default=[
+            'gs://covid-net/test.zip'])
     parser.add_argument(
         '--train-indices',
         nargs='+',
@@ -210,6 +226,12 @@ if __name__ == "__main__":
         help='job directory',
         default=[
             "gs://covid-net/models/"])
+    parser.add_argument(
+        '--output-path',
+        nargs='+',
+        help='path of output',
+        default=[
+            "gs://covid-net/models/pred.csv"])
 
     # data_path = os.path.join(os.getcwd(), '../train/train/')
     # data_labels_path = '../train_labels.csv'
@@ -220,7 +242,7 @@ if __name__ == "__main__":
     with tf.io.gfile.GFile(arguments['data_labels'][0], 'rb') as fid:
         data_labels = fid.read()
     
-    df_true = pd.read_csv(io.BytesIO(data_labels)).head(250)
+    df_true = pd.read_csv(io.BytesIO(data_labels))
 
     print(df_true.head())
 
@@ -230,16 +252,16 @@ if __name__ == "__main__":
     partition['validation'] = x_val_indices.values
     labels = {v['File']:v['Label'] for (k, v) in df_true.transpose().to_dict().items()}
 
-    print(f"Loading data from {arguments['train_files'][0]}")
-    data = load_data(arguments['train_files'][0], df_true['File'])
+    print(f"Downloading, unzipping, and loading data from {arguments['train_files'][0]}")
+    load_data(arguments['train_files'][0])
+    test_files, test_data = load_data(arguments['test_files'][0], get_test_data=True)
 
     # Parameters
     params = {'dim': (512, 512),
-            'batch_size': 32,
+            'batch_size': 48,
             'n_classes': 1,
             'n_channels': 1,
-            'shuffle': True,
-            'images_in_mem': data}
+            'shuffle': True}
 
     # Distributed strategy
     strategy = tf.distribute.MultiWorkerMirroredStrategy()
@@ -260,7 +282,7 @@ if __name__ == "__main__":
     print(f"Model created, mem usage {process.memory_info().rss}")
 
     # Generators
-    training_generator = DataGenerator(partition['train'], labels, arguments['train_files'][0], **params)
+    training_generator = DataGenerator(partition['train'], labels, **params)
     # validation_generator = DataGenerator(partition['validation'], labels, data_path, **params)
 
     class_weights = class_weight.compute_class_weight(class_weight='balanced', classes=np.unique(df_true['Label']), y=df_true['Label'])
@@ -268,7 +290,7 @@ if __name__ == "__main__":
 
     print("Fitting model")
 
-    NUM_EPOCHS = 3
+    NUM_EPOCHS = 2
 
     # Train model on dataset
     multi_worker_model.fit(
@@ -276,14 +298,18 @@ if __name__ == "__main__":
         epochs=NUM_EPOCHS, 
         steps_per_epoch=np.ceil(df_true.shape[0] / params['batch_size']),
         class_weight=class_weights,
-        max_queue_size=20,
-        workers=8,
-        # use_multiprocessing=True,
+        max_queue_size=30,
+        workers=16,
+        use_multiprocessing=True,
     )
 
-    print("Saving model")
+    predictions = multi_worker_model.predict(test_data)
+    predictions = np.squeeze(predictions > 0.5).astype(np.uint8)
+    predictions = pd.DataFrame({"File": test_files, "Label": predictions})
 
-    # save_model(arguments['job_dir']['0'], multi_worker_model)
+    print("Saving results")
+
+    save_data(arguments['output_path'][0], predictions)
 
     print(f"Process finished, mem usage {process.memory_info().rss}")
 
