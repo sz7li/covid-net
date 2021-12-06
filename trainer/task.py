@@ -104,7 +104,7 @@ class DataGenerator(Sequence):
 def create_model():
     inputs = Input(shape=(512, 512, 1))
 
-    conv = Conv2D(20, (3, 3), activation='relu') (inputs)
+    conv = Conv2D(24, (3, 3), activation='relu') (inputs)
     conv = MaxPooling2D((2, 2)) (conv)
     conv = Dropout(0.2) (conv)
 
@@ -123,7 +123,7 @@ def create_model():
 
     model = Model(inputs=inputs, outputs=output)
 
-    opt = tf.keras.optimizers.Adam(learning_rate=0.001)
+    opt = tf.keras.optimizers.Adam(learning_rate=0.0005)
 
     model.compile(loss="binary_crossentropy", optimizer=opt, metrics=["mae", "accuracy"])
     print(model.summary())
@@ -168,7 +168,7 @@ def save_data(model_path, data):
     if not is_chief:
         model_path = _get_temp_dir(model_path, cluster_resolver)
 
-    data.to_csv(model_path, index=False)
+    data.to_csv(f"{model_path}/pred.csv", index=False)
 
     if is_chief:
         # wait for workers to delete; check every 100ms
@@ -231,7 +231,7 @@ if __name__ == "__main__":
         nargs='+',
         help='path of output',
         default=[
-            "gs://covid-net/models/pred.csv"])
+            "gs://covid-net/models"])
 
     # data_path = os.path.join(os.getcwd(), '../train/train/')
     # data_labels_path = '../train_labels.csv'
@@ -258,7 +258,7 @@ if __name__ == "__main__":
 
     # Parameters
     params = {'dim': (512, 512),
-            'batch_size': 48,
+            'batch_size': 32,
             'n_classes': 1,
             'n_channels': 1,
             'shuffle': True}
@@ -290,7 +290,7 @@ if __name__ == "__main__":
 
     print("Fitting model")
 
-    NUM_EPOCHS = 2
+    NUM_EPOCHS = 3
 
     # Train model on dataset
     multi_worker_model.fit(
